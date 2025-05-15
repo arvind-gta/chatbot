@@ -1,12 +1,13 @@
-pip install pymupdf langchain nltk faiss-cpu
-
 import os
 import argparse
 import PyPDF2
+import pdfplumber
+import pytesseract
+from PIL import Image
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 import faiss
 import numpy as np
+from rich import print
 
 class RAGDatabase:
     def __init__(self, pdf_folder):
@@ -15,24 +16,47 @@ class RAGDatabase:
         self.vector_database = None
 
     def extract_text_from_pdfs(self):
-        """Extract text from all PDFs in the specified folder."""
         for filename in os.listdir(self.pdf_folder):
             if filename.endswith('.pdf'):
-                with open(os.path.join(self.pdf_folder, filename), 'rb') as f:
-                    pdf_reader = PyPDF2.PdfReader(f)
-                    text = ""
-                    for page in pdf_reader.pages:
-                        text += page.extract_text()
-                    self.text_chunks.extend(self.semantic_chunking(text))
+                pdf_path = os.path.join(self.pdf_folder, filename)
+                text = self.extract_text_with_pdfplumber(pdf_path, filename)
 
-    def semantic_chunking(self, text, chunk_size=500):
-        """Split text into semantic chunks based on chunk_size words."""
-        words = text.split()
-        chunks = [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
-        return chunks
+                if text is None or not text.strip():
+                    print(f"[yellow]No text detected in {filename} using pdfplumber. Trying OCR...[/yellow]")
+                    text = self.extract_text_with_ocr(pdf_path, filename)
+
+                if self.text_chunks:
+                    print(f"[green]Text extracted from {filename}.[/green]")
+                else:
+                    print(f"[red]Failed to extract any text from {filename}.[/red]")
+
+    def extract_text_with_pdfplumber(self, pdf_path, filename):
+        text = ""
+        with pdfplumber.open(pdf_path) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                page_text = page.extract_text() or ""
+                if page_text.strip():
+                    self.text_chunks.append(f"[PDF: {filename} | Page: {page_num}] {page_text}")
+                    text += page_text
+        return text
+
+    def extract_text_with_ocr(self, pdf_path, filename):
+        text = ""
+        with pdfplumber.open(pdf_path) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                if page.to_image():
+                    image = page.to_image().original
+                    page_text = pytesseract.image_to_string(image)
+                    if page_text.strip():
+                        self.text_chunks.append(f"[PDF: {filename} | Page: {page_num}] {page_text}")
+                        text += page_text
+        return text
 
     def create_vector_database(self):
-        """Create a FAISS vector database with the text chunks."""
+        if not self.text_chunks:
+            print("[red]Error: No text extracted from PDFs. Ensure your PDFs contain readable text.[/red]")
+            return
+
         vectorizer = TfidfVectorizer().fit(self.text_chunks)
         vectors = vectorizer.transform(self.text_chunks).toarray().astype('float32')
 
@@ -40,7 +64,10 @@ class RAGDatabase:
         self.vector_database.add(vectors)
 
     def query_database(self, query, top_k=5):
-        """Query the RAG database and return the most relevant chunks."""
+        if not self.text_chunks:
+            print("[red]Error: No text database found. Please extract text and create the database first.[/red]")
+            return []
+
         vectorizer = TfidfVectorizer().fit(self.text_chunks)
         query_vector = vectorizer.transform([query]).toarray().astype('float32')
 
@@ -49,11 +76,15 @@ class RAGDatabase:
 
 # Example usage
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="RAG Database with Semantic Chunking")
-    parser.add_argument('--pdf_folder', type=str, default='./pdfs', help='Path to folder containing PDF files')
-    args = parser.parse_args()
+    import sys
+    if any('ipykernel_launcher' in arg for arg in sys.argv):
+        pdf_folder = './pdfs'  # Default for Jupyter
+    else:
+        parser = argparse.ArgumentParser(description="RAG Database with Semantic Chunking")
+        parser.add_argument('--pdf_folder', type=str, default='./pdfs', help='Path to folder containing PDF files')
+        args = parser.parse_args()
+        pdf_folder = args.pdf_folder
 
-    pdf_folder = args.pdf_folder
     if not os.path.exists(pdf_folder):
         os.makedirs(pdf_folder)
 
@@ -61,8 +92,12 @@ if __name__ == '__main__':
     db.extract_text_from_pdfs()
     db.create_vector_database()
 
-    query = "what are the steps for launch lifeboats using falls method?"
-    results = db.query_database(query)
-    print("Top results:")
-    for res in results:
-        print(res)
+    if not db.text_chunks:
+        print("[red]No text was extracted. Please check your PDFs.[/red]")
+    else:
+        query = "what are the steps for launch lifeboats using falls method?"
+        results = db.query_database(query)
+
+        print("\n[green]Top results:[/green]")
+        for res in results:
+            print(f"[blue]- {res}")
